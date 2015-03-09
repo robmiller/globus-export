@@ -1,0 +1,174 @@
+#!/usr/bin/env ruby
+
+require_relative "../lib/bms-import"
+
+require "thread"
+require "logger"
+require "fileutils"
+require "thor"
+require "ruby-progressbar"
+
+module BMSImport
+  class Import < Thor
+
+    class_option :threads,  default: 5
+    class_option :bms_url,  required: true, aliases: :b
+    class_option :username, required: true, aliases: :u
+    class_option :password, required: true, aliases: :p
+
+    desc "crawl [CATEGORY_URL]", "Crawl the given category URL and everything below it."
+    def crawl(category_url)
+      @category_urls = Queue.new
+      @asset_urls    = Queue.new
+
+      @category_urls << category_url
+
+      @category_fetchers = []
+
+      options[:threads].times do
+        @category_fetchers << Thread.new do
+          fetch_categories
+        end
+      end
+
+      @category_fetchers.each do |thread|
+        thread.join
+      end
+
+      categories_count = DB[:categories].count
+      assets_count = @asset_urls.length
+      logger.info "Discovered #{categories_count} categories containing #{assets_count} assets."
+
+      @asset_fetchers = []
+
+      options[:threads].times do
+        @asset_fetchers << Thread.new do
+          fetch_assets
+        end
+      end
+
+      @asset_fetchers.each do |thread|
+        thread.join
+      end
+    end
+
+    desc "download", "Download all pending assets"
+    method_option :output_dir, default: "output"
+    def download
+      agent = BMSImport.agent(options[:bms_url], options[:username], options[:password])
+
+      output_dir = Pathname(options[:output_dir])
+      unless output_dir.exist?
+        $stderr.puts "Specified output directory doesn't exist"
+        exit 1
+      end
+
+      total_assets = Asset.where(downloaded: false).count
+      progress = ProgressBar.create(title: "Downloading #{total_assets} assets", total: total_assets)
+
+      Asset.where(downloaded: false).each_with_index do |asset, n|
+        next unless asset.url
+
+        asset_dir = output_dir + Pathname(asset.category.path)
+        FileUtils.mkdir_p(asset_dir)
+
+        progress.log "Downloading #{asset.url} to #{asset_dir}"
+        progress.title = "#{total_assets - n}/#{total_assets} assets remaining"
+
+        agent.download(asset.url, asset_dir + File.basename(asset.url))
+
+        asset.downloaded = true
+        asset.save
+
+        progress.increment
+      end
+    end
+
+    no_commands do
+      def logger
+        @logger ||=
+          begin
+            logger = Logger.new($stdout)
+            logger.level = Logger::INFO
+            logger
+          end
+      end
+
+      def fetch_categories
+        agent = BMSImport.agent(options[:bms_url], options[:username], options[:password])
+
+        loop do
+          url = nil
+          begin
+            with_retries(rescue: ThreadError, max_tries: 5, base_sleep_seconds: 1) do
+              url = @category_urls.pop(true)
+            end
+          rescue ThreadError
+            break
+          end
+
+          logger.info "Got a new category page: #{url}"
+
+          fetch_category(url, agent)
+        end
+      end
+
+      def fetch_category(url, agent)
+        page = CategoryPage.new(url, agent)
+
+        logger.info "This category seems to have #{page.categories.length} sub-categories and #{page.assets.length} assets"
+
+        page.categories.each do |category_url|
+          @category_urls << category_url
+        end
+
+        page.assets.each do |asset_url|
+          @asset_urls << asset_url
+        end
+
+        with_retries(rescue: Sequel::DatabaseError, max_tries: 10, base_sleep_seconds: 0.5) do
+          Category.unrestrict_primary_key
+          category = Category.new(id: page.id, name: page.name, parent_id: page.parent)
+          category.calculate_path
+          category.save
+        end
+      end
+
+      def fetch_assets
+        agent = BMSImport.agent(options[:bms_url], options[:username], options[:password])
+
+        loop do
+          url = nil
+          begin
+            with_retries(rescue: ThreadError, max_tries: 5, base_sleep_seconds: 1) do
+              url = @asset_urls.pop(true)
+            end
+          rescue ThreadError
+            break
+          end
+
+          logger.info "Processing an asset: #{url}"
+
+          fetch_asset(url, agent)
+        end
+      end
+
+      def fetch_asset(url, agent)
+        with_retries(rescue: Mechanize::ResponseCodeError, max_tries: 5, base_sleep_seconds: 1) do
+          page = AssetPage.new(url, agent)
+
+          category = Category[page.category]
+          asset = Asset.new(name: page.name, url: page.asset_url, category: category)
+          asset.save
+        end
+      rescue Mechanize::RedirectLimitReachedError
+        return
+      rescue Net::HTTP::Persistent::Error
+        agent = BMSImport.agent(options[:bms_url], options[:username], options[:password])
+        retry
+      end
+    end
+  end
+end
+
+BMSImport::Import.start
