@@ -71,18 +71,17 @@ module BMSImport
 
       semaphore = Mutex.new
 
-      5.times do
+      10.times do
         @downloaders << Thread.new do
           loop do
+            break if Asset.undownloaded.count == 0
+
             asset, asset_dir = nil
             semaphore.synchronize do
               asset = Asset.undownloaded.first
 
               asset.downloading = true
               asset.save
-
-              break unless asset
-              next unless asset.url
 
               asset_dir = output_dir + Pathname(asset.category.path)
               FileUtils.mkdir_p(asset_dir)
@@ -91,6 +90,8 @@ module BMSImport
               total_assets -= 1
               progress.title = "#{total_assets}/#{original_total} assets remaining"
             end
+
+            next unless asset
 
             begin
               agent.download(asset.url, asset_dir + File.basename(asset.url))
