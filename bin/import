@@ -63,7 +63,7 @@ module BMSImport
         exit 1
       end
 
-      total_assets = Asset.where(downloaded: false).count
+      total_assets = Asset.undownloaded.count
       original_total = total_assets
       progress = ProgressBar.create(title: "Downloading #{total_assets} assets", total: total_assets)
 
@@ -76,7 +76,8 @@ module BMSImport
           loop do
             asset, asset_dir = nil
             semaphore.synchronize do
-              asset = Asset.first(downloaded: false, downloading: false)
+              asset = Asset.undownloaded.first
+
               asset.downloading = true
               asset.save
 
