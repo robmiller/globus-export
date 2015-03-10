@@ -64,23 +64,47 @@ module BMSImport
       end
 
       total_assets = Asset.where(downloaded: false).count
+      original_total = total_assets
       progress = ProgressBar.create(title: "Downloading #{total_assets} assets", total: total_assets)
 
-      Asset.where(downloaded: false).each_with_index do |asset, n|
-        next unless asset.url
+      @downloaders = []
 
-        asset_dir = output_dir + Pathname(asset.category.path)
-        FileUtils.mkdir_p(asset_dir)
+      semaphore = Mutex.new
 
-        progress.log "Downloading #{asset.url} to #{asset_dir}"
-        progress.title = "#{total_assets - n}/#{total_assets} assets remaining"
+      5.times do
+        @downloaders << Thread.new do
+          loop do
+            asset = nil
+            semaphore.synchronize do
+              asset = Asset.where(downloaded: false).order(Sequel.lit('random()')).first
+            end
+            break unless asset
+            next unless asset.url
 
-        agent.download(asset.url, asset_dir + File.basename(asset.url))
+            asset_dir = output_dir + Pathname(asset.category.path)
+            FileUtils.mkdir_p(asset_dir)
 
-        asset.downloaded = true
-        asset.save
+            progress.log "Downloading #{asset.url} to #{asset_dir}"
+            semaphore.synchronize do
+              total_assets -= 1
+              progress.title = "#{total_assets}/#{original_total} assets remaining"
+            end
 
-        progress.increment
+            begin
+              agent.download(asset.url, asset_dir + File.basename(asset.url))
+            rescue Mechanize::ResponseCodeError
+            end
+
+            asset.downloaded = true
+            asset.save
+
+            progress.increment
+          end
+        end
+      end
+
+      @downloaders.each do |thread|
+        thread.join
       end
     end
 
