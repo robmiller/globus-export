@@ -183,9 +183,12 @@ module BMSImport
         with_retries(rescue: Mechanize::ResponseCodeError, max_tries: 5, base_sleep_seconds: 1) do
           page = AssetPage.new(url, agent)
 
-          category = Category[page.category]
-          asset = Asset.new(name: page.name, url: page.asset_url, category: category)
-          asset.save
+          unless Asset[page.id]
+            category = Category[page.category]
+            Asset.unrestrict_primary_key
+            asset = Asset.new(id: page.id, name: page.name, url: page.asset_url, category: category)
+            asset.save rescue Sequel::UniqueConstraintViolation
+          end
         end
       rescue Mechanize::RedirectLimitReachedError
         return
