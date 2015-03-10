@@ -74,18 +74,19 @@ module BMSImport
       5.times do
         @downloaders << Thread.new do
           loop do
-            asset = nil
+            asset, asset_dir = nil
             semaphore.synchronize do
-              asset = Asset.where(downloaded: false).order(Sequel.lit('random()')).first
-            end
-            break unless asset
-            next unless asset.url
+              asset = Asset.first(downloaded: false, downloading: false)
+              asset.downloading = true
+              asset.save
 
-            asset_dir = output_dir + Pathname(asset.category.path)
-            FileUtils.mkdir_p(asset_dir)
+              break unless asset
+              next unless asset.url
 
-            progress.log "Downloading #{asset.url} to #{asset_dir}"
-            semaphore.synchronize do
+              asset_dir = output_dir + Pathname(asset.category.path)
+              FileUtils.mkdir_p(asset_dir)
+
+              progress.log "Downloading #{asset.url} to #{asset_dir}"
               total_assets -= 1
               progress.title = "#{total_assets}/#{original_total} assets remaining"
             end
@@ -95,6 +96,7 @@ module BMSImport
             rescue Mechanize::ResponseCodeError
             end
 
+            asset.downloading = false
             asset.downloaded = true
             asset.save
 

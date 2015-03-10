@@ -25,7 +25,8 @@ DB.create_table? :assets do
   String  :name
   String  :url, text: true
   Integer :category_id
-  Boolean :downloaded, default: 0
+  Boolean :downloading, default: false
+  Boolean :downloaded, default: false
 end
 
 module BMSImport
